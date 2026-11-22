@@ -66,6 +66,13 @@ static inline int munmap(void*, size_t) { return 0; }
 #include <unistd.h>
 #endif
 
+#if defined(_MSC_VER)
+#include <immintrin.h>
+#define IK2_PAUSE() _mm_pause()
+#else
+#define IK2_PAUSE() __builtin_ia32_pause()
+#endif
+
 #if defined(CUDART_VERSION) && CUDART_VERSION >= 13000
 static inline cudaError_t cudaMemPrefetchAsync_compat(const void* devPtr, size_t count, int dstDevice, cudaStream_t stream = 0) {
     cudaMemLocation loc{};
@@ -2696,7 +2703,7 @@ void dp_service() {
                 }
             }
             dp_advance(false);
-            if (++spin < 200000) __builtin_ia32_pause();
+            if (++spin < 200000) IK2_PAUSE();
             else std::this_thread::yield();
         }
         std::atomic_thread_fence(std::memory_order_acquire);
@@ -4638,7 +4645,9 @@ int run(int argc, char** argv) {
     const bool host_mmap = !getenv_str("IK2_HOST").empty() ? getenv_str("IK2_HOST") == "mmap" : g_fast_want;
 #endif
     if (host_mmap) {
-        if (g_pool) die("IK2_HOST=mmap with the CPU lane");
+        // EXPERIMENTAL: let the AVX2 CPU lane read the mapped (pageable) weights instead of forcing a large
+        // cudaHostAlloc on Windows. CUDA may stage the link copies, so overlap can be worse than with pinned host.
+        if (g_pool) std::fprintf(stderr, "[ik2] warning: CPU lane with pageable mmap host copy (experimental)\n");
         for (const auto& J : exp_jobs) {
             Layer& Ly = M.L[J.l];
             const uint8_t* p = S.data(J.name);

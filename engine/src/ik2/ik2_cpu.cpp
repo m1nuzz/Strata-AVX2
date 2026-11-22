@@ -10,16 +10,45 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "ik2_iq_tables.h"
 
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#define IK2_X86 1
+#define IK2_AVX2
+static bool cpu_has_avx2_fma_f16c() {
+    int r[4] = {0, 0, 0, 0};
+    __cpuid(r, 1);
+    const bool f16c = (r[2] & (1 << 29)) != 0, fma = (r[2] & (1 << 12)) != 0;
+    __cpuid(r, 7);
+    const bool avx2 = (r[1] & (1 << 5)) != 0;
+    return avx2 && fma && f16c;
+}
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define IK2_X86 1
+#define IK2_AVX2 __attribute__((target("avx2,fma,f16c")))
+static bool cpu_has_avx2_fma_f16c() {
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("f16c");
+}
+#else
+#define IK2_X86 0
+#define IK2_AVX2
+static bool cpu_has_avx2_fma_f16c() { return false; }
+#endif
+
 namespace ik2::cpu {
 
 bool available() {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    int r[4] = {0, 0, 0, 0};
+    __cpuid(r, 7);
+    return (r[1] & (1 << 16)) != 0 && (r[1] & (1 << 30)) != 0;   // AVX512F / AVX512BW
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
     return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw");
 #else
     return false;
@@ -150,9 +179,8 @@ void nvfp4_rows_avx512(const uint8_t* W, int K, int r0, int r1, const float* x, 
 }
 #endif
 
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if IK2_X86
 // IQ3_S / IQ4_NL / Q8_0 on AVX2 + FMA: fp32 row dots straight over the GGUF's blocks
-#define IK2_AVX2 __attribute__((target("avx2,fma,f16c")))
 const uint32_t k_iq3s_grid[512] = {IK2_IQ3S_GRID};
 const int8_t k_iq4nl[16] = {IK2_IQ4NL_VALUES};
 // IQ3_S's grid as 4 floats an entry (8 KB, stays in L1) and the 16 sign patterns as xor masks
@@ -170,7 +198,11 @@ const Iq3sTab g_iq3s;
 IK2_AVX2 inline float f16_at(const uint8_t* p) {
     uint16_t h;
     std::memcpy(&h, p, 2);
-    return _cvtsh_ss(h);
+    const int e = (h >> 10) & 0x1F, m = h & 0x3FF;
+    float v = e == 0 ? std::ldexp((float) m, -24)
+            : e == 31 ? (m ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity())
+                      : std::ldexp(1.0f + (float) m / 1024.0f, e - 15);
+    return (h & 0x8000u) ? -v : v;
 }
 IK2_AVX2 inline float hsum8(__m256 v) {
     __m128 a = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
@@ -352,14 +384,13 @@ void nvfp4_rows(const uint8_t* W, int K, int r0, int r1, const float* x, float* 
 bool available_any() { return available() || available_for(20); }
 bool available_for(int type) {
     if (type == 40) return available();
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-    if (type == 20 || type == 21 || type == 8)
-        return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("f16c");
+#if IK2_X86
+    if (type == 20 || type == 21 || type == 8) return cpu_has_avx2_fma_f16c();
 #endif
     return false;
 }
 void rows(int type, const uint8_t* W, int K, int r0, int r1, const float* x, float* out) {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if IK2_X86
     if (type == 21 || type == 20 || type == 8) {
         static const bool ok = available_for(type);   // (AVX2 + FMA + F16C: the dots are built for them)
         if (!ok) {
@@ -387,7 +418,7 @@ void rows(int type, const uint8_t* W, int K, int r0, int r1, const float* x, flo
 
 // rows by the int8 dots (IQ3_S / IQ4_NL only; xq / xs from quant_q8)
 void rows_q8(int type, const uint8_t* W, int K, int r0, int r1, const int8_t* xq, const float* xs, float* out) {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if IK2_X86
     if ((type != 21 && type != 20) || !available_for(type)) {
         std::fprintf(stderr, "ik2 CPU lane: no int8 CPU dot for GGUF type %d here\n", type);
         std::abort();
@@ -407,7 +438,7 @@ void rows_q8(int type, const uint8_t* W, int K, int r0, int r1, const int8_t* xq
 #endif
 }
 void quant_q8(const float* x, int K, int8_t* q, float* sc) {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if IK2_X86
     quant_q8_32(x, K, q, sc);
 #else
     std::fprintf(stderr, "ik2 CPU lane: no int8 CPU dots in this build\n");

@@ -18,8 +18,10 @@ def end_token_ids(tokenizer) -> set[int]:
         got = tokenizer.encode(marker, parse_special=True)
         if len(got) == 1:
             ids.add(int(got[0]))
-    if not ids:
-        eos = (getattr(tokenizer, "special_ids", None) or {}).get("eos")
-        if eos is not None:
-            ids.add(int(eos))
+    # A family can name its own end token in addition to the shared markers. Inkling 2 uses
+    # <|content_model_end_sampling|> as eos while <|endoftext|> is only a padding id: without this,
+    # the engine stops on eos but the server never sees a stop id and reports "length" forever.
+    eos = (getattr(tokenizer, "special_ids", None) or {}).get("eos")
+    if eos is not None:
+        ids.add(int(eos))
     return ids

@@ -574,6 +574,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
 
   # the Inkling 2 engine path (GGUF architecture inkling2)
   if(STRATA_ENABLE_CUDA)
+    if(MSVC)
+      # the CPU lane's AVX2/FMA/F16C dots are compiled for the whole file; runtime CPU checks still gate them
+      set_source_files_properties(src/ik2/ik2_cpu.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    endif()
     add_library(strata_ik2 STATIC src/ik2/ik2_engine.cu src/ik2/ik2_draft.cu src/ik2/ik2_kernels.cu src/ik2/ik2_cpu.cpp)
     target_include_directories(strata_ik2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include src/ik2 PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(strata_ik2 PRIVATE strata_warnings ${_strata_gpu_runtime_target} ${_strata_gpu_blas_target} Threads::Threads)
