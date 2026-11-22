@@ -3060,7 +3060,13 @@ class InklingRewriter:
                 raise ValueError(self.body)
         except ValueError:
             return self._close() + self.body
-        val = lambda v: json.dumps(v, ensure_ascii=False).replace("<", "\\u003c")
+        # The <parameter> dialect the call is rewritten into reads declared-string values as raw text
+        # (coerce_value only JSON-decodes non-string parameters), so a string value must be written raw:
+        # json.dumps would wrap it in quotes that then reach the tool client ("https://..." -> "\"https://...\"")
+        # and, re-rendered in history, teach the model to escape its own arguments harder each turn.
+        # Non-string values keep their JSON encoding: coerce_value json-loads them, and the < escape
+        # guards the markers, decoding back on json.loads.
+        val = lambda v: v if isinstance(v, str) else json.dumps(v, ensure_ascii=False).replace("<", "\\u003c")
         return (self._close() + CALL_START + f"<function={name}>\n" +
                 "".join(f"<parameter={k}>\n{val(v)}\n</parameter>\n" for k, v in args.items()) + "</function>" + CALL_END)
 
